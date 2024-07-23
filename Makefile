@@ -6,40 +6,7 @@ WASI_SDK := wasi-sdk-22.0
 WASI_SDK_PATH := $(DIR)/build/${WASI_SDK}
 WASI_SDK_URL := https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-22/wasi-sdk-22.0-linux.tar.gz
 
-# LLVM has some (unreachable in our configuration) calls to mmap.
-# Some of the host APIs that are statically required by LLVM (notably threading) are dynamically
-# never used. An LTO build removes imports of these APIs, simplifying deployment
-WASM_CFLAGS := \
-	-D_WASI_EMULATED_MMAN
-
-WASM_CXXFLAGS := \
-	-D_WASI_EMULATED_MMAN
-
-# # Compiling C++ code requires a lot of stack space and can overflow and corrupt the heap.
-# (For example, `#include <iostream>` alone does it in a build with the default stack size.)
-WASM_LDFLAGS := \
-	-lwasi-emulated-mman \
-	-Wl,--max-memory=4294967296 
-
-NPROCS:=$(shell nproc)
-
-all: build/llvm.BUILT build/llvm-config.BUILT
-
-build:
-	mkdir -p build
-	
-build/wasi-sdk.DOWNLOADED: build
-	if [ ! -d build/${WASI_SDK} ]; then curl -L ${WASI_SDK_URL} | tar xzf -; mv wasi-sdk-* build/${WASI_SDK}; fi
-	touch $@
-
-build/llvm-src.COPIED: llvm-project | build
-	rsync -a --delete llvm-project/ build/llvm-src
-	touch $@
-
-build/llvm-host.CONFIG: build/llvm-src.COPIED
-	cmake -S build/llvm-src/llvm -B build/llvm-host-build \
-		-DCMAKE_INSTALL_PREFIX="${DIR}/build/llvm" \
-		-DCMAKE_BUILD_TYPE="MinSizeRel" \
+LLVM_TOOLS := \
 		-DLLVM_TOOL_LLVM_CONFIG_BUILD=ON \
 		-DLLVM_TOOL_LLVM_LTO_BUILD=OFF \
 		-DLLVM_TOOL_LTO_BUILD=OFF \
@@ -127,13 +94,38 @@ build/llvm-host.CONFIG: build/llvm-src.COPIED
 		-DLLVM_TOOL_VFABI_DEMANGLE_FUZZER_BUILD=OFF \
 		-DLLVM_TOOL_XCODE_TOOLCHAIN_BUILD=OFF \
 		-DLLVM_TOOL_YAML2OBJ_BUILD=OFF \
-		-DLLVM_INCLUDE_RUNTIMES=OFF \
-		-DLLVM_INCLUDE_BENCHMARKS=OFF \
-		-DLLVM_INCLUDE_EXAMPLES=OFF \
-		-DLLVM_INCLUDE_TESTS=OFF \
-  	-DLLVM_INCLUDE_UTILS=OFF \
-		-DLLVM_INCLUDE_DOCS=OFF \
-		-DLLVM_ENABLE_PROJECTS=""
+		-DLLVM_TOOL_BUGPOINT_BUILD=OFF \
+		-DLLVM_TOOL_BUGPOINT_PASSES_BUILD=OFF \
+		-DLLVM_TOOL_LLVM_DWARFUTIL_BUILD=OFF
+
+# LLVM has some (unreachable in our configuration) calls to mmap.
+# Some of the host APIs that are statically required by LLVM (notably threading) are dynamically
+# never used. An LTO build removes imports of these APIs, simplifying deployment
+WASM_CFLAGS := \
+	-D_WASI_EMULATED_MMAN
+
+WASM_CXXFLAGS := \
+	-D_WASI_EMULATED_MMAN
+
+# # Compiling C++ code requires a lot of stack space and can overflow and corrupt the heap.
+# (For example, `#include <iostream>` alone does it in a build with the default stack size.)
+WASM_LDFLAGS := \
+	-lwasi-emulated-mman \
+	-Wl,--max-memory=4294967296 
+
+NPROCS:=$(shell nproc)
+
+all: build/llvm.BUILT build/llvm/bin/llvm-config
+
+build:
+	mkdir -p build
+	
+build/wasi-sdk.DOWNLOADED: build
+	if [ ! -d build/${WASI_SDK} ]; then curl -L ${WASI_SDK_URL} | tar xzf -; mv wasi-sdk-* build/${WASI_SDK}; fi
+	touch $@
+
+build/llvm-src.COPIED: llvm-project | build
+	rsync -a --delete llvm-project/ build/llvm-src
 	touch $@
 
 build/llvm.CONFIG: build/llvm-src.COPIED | build/wasi-sdk.DOWNLOADED
@@ -146,10 +138,11 @@ build/llvm.CONFIG: build/llvm-src.COPIED | build/wasi-sdk.DOWNLOADED
 		-DCMAKE_EXE_LINKER_FLAGS="${WASM_LDFLAGS}" \
 		-DWASI_SDK_PREFIX="${WASI_SDK_PATH}" \
 		-DLLVM_TARGETS_TO_BUILD="WebAssembly" \
-		-DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasi-threads \
+		-DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasi \
 		-DLLVM_ENABLE_LTO=ON \
 		-DLLVM_ENABLE_PIC=OFF \
-		-DLLVM_INCLUDE_TOOLS=OFF \
+		-DLLVM_ENABLE_THREADS=OFF \
+		${LLVM_TOOLS} \
 		-DLLVM_INCLUDE_RUNTIMES=OFF \
 		-DLLVM_INCLUDE_BENCHMARKS=OFF \
 		-DLLVM_INCLUDE_EXAMPLES=OFF \
@@ -159,14 +152,32 @@ build/llvm.CONFIG: build/llvm-src.COPIED | build/wasi-sdk.DOWNLOADED
 		-DLLVM_ENABLE_PROJECTS=""
 	touch $@
 
-build/llvm-config.BUILT: build/llvm-host.CONFIG
-	cmake --build build/llvm-host-build --target llvm-config -j ${NPROCS}
-	cp build/llvm-host-build/bin/llvm-config build/llvm/bin/
+build/llvm-host.CONFIG: build/llvm-src.COPIED
+	cmake -S build/llvm-src/llvm -B build/llvm-host-build \
+		-DCMAKE_INSTALL_PREFIX="${DIR}/build/llvm" \
+		-DCMAKE_BUILD_TYPE="MinSizeRel" \
+		${LLVM_TOOLS} \
+		-DLLVM_INCLUDE_RUNTIMES=OFF \
+		-DLLVM_INCLUDE_BENCHMARKS=OFF \
+		-DLLVM_INCLUDE_EXAMPLES=OFF \
+		-DLLVM_INCLUDE_TESTS=OFF \
+  	-DLLVM_INCLUDE_UTILS=OFF \
+		-DLLVM_INCLUDE_DOCS=OFF \
+		-DLLVM_ENABLE_PROJECTS=""
 	touch $@
-	
+
 build/llvm.BUILT: build/llvm.CONFIG
 	cmake --build build/llvm-build --target install -j ${NPROCS}
+	mv build/llvm/bin/llvm-config build/llvm/bin/llvm-config.wasm
 	touch $@
+
+build/llvm-host.BUILT: build/llvm-host.CONFIG
+	cmake --build build/llvm-host-build --target llvm-config -j ${NPROCS}
+	mv build/llvm-host-build/bin/llvm-config build/llvm/bin/llvm-config-host
+	touch $@
+
+build/llvm/bin/llvm-config: build/llvm-host.BUILT
+	cp ${DIR}/llvm-config-wrapper.sh build/llvm/bin/llvm-config
 
 clean:
 	rm -rf build/
